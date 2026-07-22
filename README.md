@@ -9,7 +9,7 @@ A read-only [pi](https://pi.dev) extension that suggests Conventional Commit mes
 Install from npm:
 
 ```bash
-pi install npm:pi-commit
+pi install npm:@andre-barbosa/pi-commit
 ```
 
 Try a local checkout without installing it:
