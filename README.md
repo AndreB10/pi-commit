@@ -1,4 +1,4 @@
-# pi-commit
+# @andre-barbosa/pi-commit
 
 A read-only [pi](https://pi.dev) extension that suggests Conventional Commit messages for uncommitted changes.
 
