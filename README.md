@@ -54,7 +54,8 @@ Overlapping folder arguments are rejected so the same change is not described tw
 /commit-model
 ```
 
-The interactive selector lists authenticated models known to pi. A model can also be selected directly:
+The interactive selector shows eight models at a time, fuzzy-filters as you type, and opens on the current commit model.
+A model can also be selected directly:
 
 ```text
 /commit-model google/gemini-2.5-flash

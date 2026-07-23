@@ -70,6 +70,7 @@ function createHarness(configured = true) {
 
   const editor = vi.fn(async (_title: string, content: string) => content);
   const select = vi.fn(async () => "test/small/model");
+  const custom = vi.fn(async () => "test/small/model");
   const notify = vi.fn();
   const setStatus = vi.fn();
   const modelRegistry = {
@@ -83,12 +84,12 @@ function createHarness(configured = true) {
     mode: "tui",
     modelRegistry,
     waitForIdle: vi.fn(async () => undefined),
-    ui: { editor, select, notify, setStatus },
+    ui: { editor, select, custom, notify, setStatus },
   } as any;
 
   createPiCommitExtension({ complete: complete as any, configStore })(pi);
 
-  return { commands, events, gitCalls, setModel, save, complete, editor, select, notify, ctx };
+  return { commands, events, gitCalls, setModel, save, complete, editor, select, custom, notify, ctx };
 }
 
 describe("pi-commit commands", () => {
@@ -132,10 +133,8 @@ describe("pi-commit commands", () => {
     await harness.events.get("session_start")({}, harness.ctx);
     await harness.commands.get("commit-model").handler("", harness.ctx);
 
-    expect(harness.select).toHaveBeenCalledWith(
-      "Select commit-message model (current: none)",
-      ["test/small/model"],
-    );
+    expect(harness.custom).toHaveBeenCalledTimes(1);
+    expect(harness.select).not.toHaveBeenCalled();
     expect(harness.save).toHaveBeenCalledWith({ provider: "test", id: "small/model" });
     expect(harness.setModel).not.toHaveBeenCalled();
   });

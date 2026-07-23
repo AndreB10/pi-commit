@@ -16,6 +16,7 @@ import {
   toModelRef,
   type CompleteFunction,
 } from "./model.js";
+import { fuzzyFilterModelKeys, showCommitModelSelector } from "./model-selector.js";
 import type { CommitSuggestion, ModelRef } from "./types.js";
 
 interface ExtensionDependencies {
@@ -71,8 +72,13 @@ export function createPiCommitExtension(dependencies: ExtensionDependencies = {}
         if (!model) throw new Error(`Commit model is unavailable or unauthenticated: ${requested}`);
       } else {
         if (!ctx.hasUI) throw new Error("Set a commit model with /commit-model provider/model-id or --commit-model.");
-        const active = selectedModel ? `${selectedModel.provider}/${selectedModel.id}` : "none";
-        const choice = await ctx.ui.select(`Select commit-message model (current: ${active})`, availableModelKeys);
+        const activeKey = selectedModel ? `${selectedModel.provider}/${selectedModel.id}` : undefined;
+        const choice = ctx.mode === "tui"
+          ? await showCommitModelSelector(ctx, models, activeKey)
+          : await ctx.ui.select(
+            `Select commit-message model (current: ${activeKey ?? "none"})`,
+            availableModelKeys,
+          );
         if (!choice) return undefined;
         model = findModelByKey(models, choice);
       }
@@ -102,7 +108,7 @@ export function createPiCommitExtension(dependencies: ExtensionDependencies = {}
     pi.registerCommand("commit-model", {
       description: "Select the model used for commit-message suggestions",
       getArgumentCompletions: (prefix) => {
-        const matches = availableModelKeys.filter((key) => key.startsWith(prefix));
+        const matches = fuzzyFilterModelKeys(availableModelKeys, prefix);
         return matches.length ? matches.map((key) => ({ value: key, label: key })) : null;
       },
       handler: async (args, ctx) => {
