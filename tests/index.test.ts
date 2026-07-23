@@ -67,8 +67,9 @@ function createHarness(configured = true) {
     if (prompt.includes("/folder2")) return assistantResponse("fix(folder2): correct second change");
     return assistantResponse("feat(repo): add repository change");
   });
+  const copyToClipboard = vi.fn(async (_text: string) => undefined);
 
-  const editor = vi.fn(async (_title: string, content: string) => content);
+  const editor = vi.fn(async (_title: string, content: string): Promise<string | undefined> => content);
   const select = vi.fn(async () => "test/small/model");
   const custom = vi.fn(async () => "test/small/model");
   const notify = vi.fn();
@@ -87,9 +88,22 @@ function createHarness(configured = true) {
     ui: { editor, select, custom, notify, setStatus },
   } as any;
 
-  createPiCommitExtension({ complete: complete as any, configStore })(pi);
+  createPiCommitExtension({ complete: complete as any, configStore, copyToClipboard })(pi);
 
-  return { commands, events, gitCalls, setModel, save, complete, editor, select, custom, notify, ctx };
+  return {
+    commands,
+    events,
+    gitCalls,
+    setModel,
+    save,
+    complete,
+    copyToClipboard,
+    editor,
+    select,
+    custom,
+    notify,
+    ctx,
+  };
 }
 
 describe("pi-commit commands", () => {
@@ -102,12 +116,25 @@ describe("pi-commit commands", () => {
 
     expect(harness.complete).toHaveBeenCalledTimes(1);
     expect(harness.editor).toHaveBeenCalledTimes(1);
+    expect(harness.editor.mock.calls[0][0]).toContain("Enter copies");
     expect(harness.editor.mock.calls[0][1]).toBe("feat(repo): add repository change");
+    expect(harness.copyToClipboard).toHaveBeenCalledWith("feat(repo): add repository change");
+    expect(harness.notify).toHaveBeenCalledWith("Copied commit suggestion to clipboard", "info");
     expect(harness.notify).toHaveBeenCalledWith(
       "Generated with test/small/model. No files were staged and no commit was created.",
       "info",
     );
     expect(harness.setModel).not.toHaveBeenCalled();
+  });
+
+  it("does not copy when the suggestion editor is cancelled", async () => {
+    const harness = createHarness();
+    harness.editor.mockResolvedValueOnce(undefined);
+    await harness.events.get("session_start")({}, harness.ctx);
+    await harness.commands.get("commit").handler("", harness.ctx);
+
+    expect(harness.copyToClipboard).not.toHaveBeenCalled();
+    expect(harness.notify).not.toHaveBeenCalledWith("Copied commit suggestion to clipboard", "info");
   });
 
   it("generates a separate message for each requested folder", async () => {

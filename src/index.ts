@@ -5,7 +5,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { normalizeRequestedPaths, parseCommandArguments } from "./args.js";
 import { createFileConfigStore, type ConfigStore } from "./config.js";
 import { ReadOnlyGit } from "./git.js";
@@ -22,6 +22,7 @@ import type { CommitSuggestion, ModelRef } from "./types.js";
 interface ExtensionDependencies {
   complete?: CompleteFunction;
   configStore?: ConfigStore;
+  copyToClipboard?: (text: string) => Promise<void>;
 }
 
 function report(ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info"): void {
@@ -42,6 +43,7 @@ export function createPiCommitExtension(dependencies: ExtensionDependencies = {}
     const configStore = dependencies.configStore ?? createFileConfigStore(join(getAgentDir(), "pi-commit.json"));
     const git = new ReadOnlyGit(pi.exec.bind(pi));
     const completeFn = dependencies.complete;
+    const copyCommitMessage = dependencies.copyToClipboard ?? copyToClipboard;
     let selectedModel: ModelRef | undefined;
     let selectedFromFlag = false;
     let availableModelKeys: string[] = [];
@@ -163,7 +165,15 @@ export function createPiCommitExtension(dependencies: ExtensionDependencies = {}
           const output = formatSuggestions(suggestions);
           const safetyNotice = `Generated with ${modelKey(model)}. No files were staged and no commit was created.`;
           if (ctx.hasUI) {
-            await ctx.ui.editor("Commit suggestions only — closing this does not commit", output);
+            const title = ctx.mode === "tui"
+              ? "Commit suggestions only — Enter copies and closes; Esc cancels"
+              : "Commit suggestions only — closing this does not commit";
+            const editedOutput = await ctx.ui.editor(title, output);
+            if (ctx.mode === "tui" && editedOutput !== undefined) {
+              await copyCommitMessage(editedOutput);
+              const label = suggestions.length === 1 ? "suggestion" : "suggestions";
+              report(ctx, `Copied commit ${label} to clipboard`, "info");
+            }
             report(ctx, safetyNotice, "info");
           } else {
             console.log(output);

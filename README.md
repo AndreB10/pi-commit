@@ -79,7 +79,7 @@ feat(ui): add compact navigation controls
 
 Allowed types are `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, and `revert`. Responses are validated and retried once when malformed.
 
-Suggestions open in an editor dialog for copying or manual adjustment. Closing the dialog has no side effect.
+Suggestions open in an editor dialog for manual adjustment. Press Enter to copy the edited text to the clipboard and close; press Escape to close without copying. Neither action stages files or creates a commit.
 
 ## What is inspected
 
