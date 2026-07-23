@@ -40,11 +40,15 @@ The package can also be placed in a global or project extension directory suppor
 /commit /folder1 /folder2
 ```
 
-Folder arguments are relative to the Git repository root. Leading `/` is optional and denotes the repository root; it is not an absolute filesystem path. Quote folders containing spaces:
+Folder arguments are relative to the current Git repository root. If the current directory is not in a repository, they are relative to the current directory so child repositories can still be requested. Leading `/` is optional and denotes that path base; it is not an absolute filesystem path. Quote folders containing spaces:
 
 ```text
 /commit "/packages/web app" /packages/api
 ```
+
+For each requested folder, pi-commit runs Git with that folder as its working directory when Git can be used there. A nested repository is therefore inspected as its own repository, even when its folder is ignored by a parent repository, while an ordinary folder in the current repository remains folder-scoped. Multiple arguments may target different repositories. If a folder cannot be used as a Git working directory, pi-commit falls back to the previous repository-root pathspec inspection.
+
+An explicitly requested folder overrides an ignore rule on that folder. In that case, ignored files are reported as `!!` and receive the same bounded, sensitive-name-aware previews as untracked files. Ignored files elsewhere remain excluded.
 
 Overlapping folder arguments are rejected so the same change is not described twice. Folders with no changes are reported and skipped. The command does not stage or partition changes—it only returns suggested messages.
 
@@ -85,12 +89,12 @@ Suggestions open in an editor dialog for manual adjustment. Press Enter to copy 
 
 pi-commit reads:
 
-- NUL-delimited `git status` output
+- NUL-delimited `git status` output, including ignored files only when their folder was explicitly requested
 - staged and unstaged diff statistics
 - staged and unstaged patches
-- bounded previews of untracked text files
+- bounded previews of untracked and explicitly included ignored text files
 
-Binary files and symlinks are represented by metadata. Untracked files with names that appear sensitive, such as `.env`, credential, secret, PEM, or key files, are not read. Context is capped before it is sent to the model, while complete filenames and statuses are retained.
+Binary files and symlinks are represented by metadata. Untracked or explicitly included ignored files with names that appear sensitive, such as `.env`, credential, secret, PEM, or key files, are not read. Context is capped before it is sent to the model, while complete filenames and statuses are retained.
 
 Selected model providers receive the included source diff. Review the provider's privacy policy before using the extension with sensitive repositories. Tracked sensitive files may still appear in Git patches.
 
@@ -101,6 +105,7 @@ Production Git execution is centralized in `ReadOnlyGit` and permits only:
 - `git rev-parse`
 - `git status`
 - `git diff`
+- `git check-ignore`
 
 Commands are invoked with argument arrays, external diff/text conversion is disabled, and there is no implementation for `git add`, `git commit`, `git stash`, `git reset`, checkout, or push.
 

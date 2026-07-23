@@ -1,6 +1,6 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ConfigStore } from "../src/config.js";
-import type { ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPiCommitExtension } from "../src/index.js";
 
@@ -24,10 +24,15 @@ function gitResult(stdout = "", code = 0): ExecResult {
   return { stdout, stderr: code ? "error" : "", code, killed: false };
 }
 
-function createHarness(configured = true) {
+function createHarness(
+  configured = true,
+  repositoryRoots: Record<string, string | null> = {},
+  ignoredDirectories: string[] = [],
+) {
   const commands = new Map<string, any>();
   const events = new Map<string, any>();
   const gitCalls: string[][] = [];
+  const gitExecutions: Array<{ args: string[]; cwd?: string }> = [];
   const setModel = vi.fn();
   const save = vi.fn(async () => undefined);
   const configStore: ConfigStore = {
@@ -35,12 +40,23 @@ function createHarness(configured = true) {
     save,
   };
 
-  const exec = vi.fn(async (command: string, args: string[]) => {
+  const exec = vi.fn(async (command: string, args: string[], options: ExecOptions = {}) => {
     expect(command).toBe("git");
     gitCalls.push(args);
+    gitExecutions.push({ args, cwd: options.cwd });
     const subcommand = args[1];
-    if (subcommand === "rev-parse") return gitResult("/repo\n");
+    if (subcommand === "rev-parse") {
+      const cwd = options.cwd ?? "";
+      const root = Object.hasOwn(repositoryRoots, cwd) ? repositoryRoots[cwd] : "/repo";
+      return root ? gitResult(`${root}\n`) : gitResult("", 1);
+    }
+    if (subcommand === "check-ignore") {
+      return ignoredDirectories.includes(args.at(-1) ?? "") ? gitResult() : gitResult("", 1);
+    }
     if (subcommand === "status") {
+      if (args.includes("--ignored=traditional") && args.includes(":(top,literal)folder1")) {
+        return gitResult("!! folder1/a.ts\0");
+      }
       if (args.includes(":(top,literal)folder1")) return gitResult(" M folder1/a.ts\0");
       if (args.includes(":(top,literal)folder2")) return gitResult(" M folder2/b.ts\0");
       return gitResult(" M src/a.ts\0");
@@ -94,6 +110,7 @@ function createHarness(configured = true) {
     commands,
     events,
     gitCalls,
+    gitExecutions,
     setModel,
     save,
     complete,
@@ -149,10 +166,66 @@ describe("pi-commit commands", () => {
     expect(output.indexOf("/folder1")).toBeLessThan(output.indexOf("/folder2"));
 
     for (const args of harness.gitCalls) {
-      expect(["rev-parse", "status", "diff"]).toContain(args[1]);
+      expect(["rev-parse", "status", "diff", "check-ignore"]).toContain(args[1]);
       expect(args).not.toContain("commit");
       expect(args).not.toContain("add");
     }
+  });
+
+  it("runs folder-scoped Git inspection from each requested folder", async () => {
+    const harness = createHarness();
+    await harness.events.get("session_start")({}, harness.ctx);
+    await harness.commands.get("commit").handler("/folder1 /folder2", harness.ctx);
+
+    const inspectionCalls = harness.gitExecutions.filter(({ args }) => args[1] === "status" || args[1] === "diff");
+    expect(inspectionCalls.filter(({ cwd }) => cwd === "/repo/folder1")).toHaveLength(5);
+    expect(inspectionCalls.filter(({ cwd }) => cwd === "/repo/folder2")).toHaveLength(5);
+  });
+
+  it("uses each folder's own repository, including when the current directory is not a repository", async () => {
+    const harness = createHarness(true, {
+      "/workspace": null,
+      "/workspace/folder1": "/workspace/folder1",
+      "/workspace/folder2": "/workspace/folder2",
+    });
+    harness.ctx.cwd = "/workspace";
+    await harness.events.get("session_start")({}, harness.ctx);
+    await harness.commands.get("commit").handler("folder1 folder2", harness.ctx);
+
+    expect(harness.complete).toHaveBeenCalledTimes(2);
+    for (const folder of ["folder1", "folder2"]) {
+      const calls = harness.gitExecutions.filter(
+        ({ args, cwd }) => cwd === `/workspace/${folder}` && (args[1] === "status" || args[1] === "diff"),
+      );
+      expect(calls).toHaveLength(5);
+      expect(calls.every(({ args }) => !args.some((argument) => argument.startsWith(":(top,literal)")))).toBe(true);
+    }
+    expect(harness.editor.mock.calls[0][1]).toContain("/folder1\nfeat(folder1): add first change");
+    expect(harness.editor.mock.calls[0][1]).toContain("/folder2\nfix(folder2): correct second change");
+  });
+
+  it("falls back to repository-root pathspec inspection when a folder cannot be used as a Git cwd", async () => {
+    const harness = createHarness(true, { "/repo/folder1": null });
+    await harness.events.get("session_start")({}, harness.ctx);
+    await harness.commands.get("commit").handler("folder1", harness.ctx);
+
+    const inspectionCalls = harness.gitExecutions.filter(({ args }) => args[1] === "status" || args[1] === "diff");
+    expect(inspectionCalls).toHaveLength(5);
+    expect(inspectionCalls.every(({ cwd }) => cwd === "/repo")).toBe(true);
+    expect(inspectionCalls.every(({ args }) => args.includes(":(top,literal)folder1"))).toBe(true);
+  });
+
+  it("includes ignored files when their folder is explicitly requested", async () => {
+    const harness = createHarness(true, {}, ["folder1/"]);
+    await harness.events.get("session_start")({}, harness.ctx);
+    await harness.commands.get("commit").handler("folder1", harness.ctx);
+
+    expect(harness.complete).toHaveBeenCalledTimes(1);
+    const ignoredStatus = harness.gitExecutions.find(
+      ({ args }) => args[1] === "status" && args.includes("--ignored=traditional"),
+    );
+    expect(ignoredStatus?.cwd).toBe("/repo/folder1");
+    expect(ignoredStatus?.args).toContain(":(top,literal)folder1");
   });
 
   it("selects and persists a dedicated model without calling pi.setModel", async () => {

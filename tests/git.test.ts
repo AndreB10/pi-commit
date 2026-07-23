@@ -108,17 +108,79 @@ describe("read-only Git inspection", () => {
     }
   });
 
-  it("filters a literal folder and marks bounded context as truncated", async () => {
+  it("filters a literal folder from that folder's Git working directory and marks bounded context as truncated", async () => {
     const root = await createRepository();
     await writeFile(join(root, "folder1", "tracked.txt"), `${"large change\n".repeat(200)}`);
     await writeFile(join(root, "folder2", "rename-me.txt"), "other change\n");
-    const reader = new ReadOnlyGit(processExec);
+    const folderCwd = join(root, "folder1");
+    const workingDirectories: Array<string | undefined> = [];
+    const reader = new ReadOnlyGit(async (command, args, options) => {
+      workingDirectories.push(options?.cwd);
+      return processExec(command, args, options);
+    });
 
-    const group = await reader.collectGroup(root, "folder1", 300);
+    const group = await reader.collectGroup(root, "folder1", 300, folderCwd);
     expect(group.files.map((file) => file.path)).toEqual(["folder1/tracked.txt"]);
     expect(group.truncated).toBe(true);
     expect(group.context).toContain("Git context was truncated");
     expect(group.context).not.toContain("folder2/rename-me.txt");
+    expect(workingDirectories).toEqual(Array(5).fill(folderCwd));
+  });
+
+  it("includes files from an explicitly requested ignored folder without exposing sensitive content", async () => {
+    const root = await createRepository();
+    await writeFile(join(root, ".gitignore"), "ignored/\n");
+    await git(root, "add", ".gitignore");
+    await git(root, "commit", "-qm", "test(repo): ignore fixture folder");
+    await mkdir(join(root, "ignored"));
+    await writeFile(join(root, "ignored", "source.ts"), "export const ignored = true;\n");
+    await writeFile(join(root, "ignored", ".env"), "TOKEN=do-not-send\n");
+
+    const reader = new ReadOnlyGit(processExec);
+    expect(await reader.isIgnoredDirectory(root, "ignored")).toBe(true);
+    expect(await reader.isIgnoredDirectory(root, "folder1")).toBe(false);
+    expect((await reader.collectGroup(root, "ignored")).files).toEqual([]);
+
+    const group = await reader.collectGroup(
+      root,
+      "ignored",
+      undefined,
+      join(root, "ignored"),
+      "ignored",
+      true,
+    );
+    expect(group.files).toEqual([
+      { indexStatus: "!", worktreeStatus: "!", path: "ignored/.env" },
+      { indexStatus: "!", worktreeStatus: "!", path: "ignored/source.ts" },
+    ]);
+    expect(group.context).toContain("export const ignored = true");
+    expect(group.context).toContain("Ignored (`!!`) files are included");
+    expect(group.context).toContain("content omitted: potentially sensitive filename");
+    expect(group.context).not.toContain("do-not-send");
+  });
+
+  it("uses a child repository even when its folder is ignored by the parent repository", async () => {
+    const parent = await createRepository();
+    await writeFile(join(parent, ".gitignore"), "child-repo/\n");
+    await git(parent, "add", ".gitignore");
+    await git(parent, "commit", "-qm", "test(repo): ignore child repository");
+
+    const child = join(parent, "child-repo");
+    await mkdir(child);
+    await git(child, "init", "-q");
+    await git(child, "config", "user.email", "tests@example.com");
+    await git(child, "config", "user.name", "Tests");
+    await writeFile(join(child, "source.ts"), "export const value = 1;\n");
+    await git(child, "add", ".");
+    await git(child, "commit", "-qm", "test(repo): create child fixture");
+    await writeFile(join(child, "source.ts"), "export const value = 2;\n");
+
+    const reader = new ReadOnlyGit(processExec);
+    expect(await reader.findRepositoryRoot(child)).toBe(child);
+    const group = await reader.collectGroup(child, undefined, undefined, child, "child-repo");
+    expect(group.label).toBe("/child-repo");
+    expect(group.files).toEqual([{ indexStatus: " ", worktreeStatus: "M", path: "source.ts" }]);
+    expect(group.context).toContain("export const value = 2");
   });
 
   it("supports an unborn repository with untracked files", async () => {

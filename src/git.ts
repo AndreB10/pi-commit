@@ -6,7 +6,7 @@ import type { ChangeGroup, ChangedFile } from "./types.js";
 
 export type GitExec = (command: string, args: string[], options?: ExecOptions) => Promise<ExecResult>;
 
-const READ_ONLY_SUBCOMMANDS = new Set(["rev-parse", "status", "diff"]);
+const READ_ONLY_SUBCOMMANDS = new Set(["rev-parse", "status", "diff", "check-ignore"]);
 const DEFAULT_CONTEXT_LIMIT = 60_000;
 const UNTRACKED_PREVIEW_LIMIT = 8_192;
 
@@ -102,7 +102,7 @@ export class ReadOnlyGit {
   constructor(private readonly exec: GitExec) {}
 
   private async run(
-    subcommand: "rev-parse" | "status" | "diff",
+    subcommand: "rev-parse" | "status" | "diff" | "check-ignore",
     args: string[],
     cwd: string,
   ): Promise<ExecResult> {
@@ -116,22 +116,43 @@ export class ReadOnlyGit {
     return result.stdout.trim();
   }
 
-  async collectGroup(repoRoot: string, path?: string, contextLimit = DEFAULT_CONTEXT_LIMIT): Promise<ChangeGroup> {
+  async isIgnoredDirectory(repoRoot: string, path: string): Promise<boolean> {
+    if (!path) return false;
+    const directoryPath = `${path.replace(/\/+$/, "")}/`;
+    const result = await this.run("check-ignore", ["-q", "--no-index", "--", directoryPath], repoRoot);
+    if (result.code === 0) return true;
+    if (result.code === 1) return false;
+    throw new Error(result.stderr.trim() || `Unable to inspect Git ignore rules for ${path}`);
+  }
+
+  async collectGroup(
+    repoRoot: string,
+    path?: string,
+    contextLimit = DEFAULT_CONTEXT_LIMIT,
+    cwd = repoRoot,
+    displayPath = path,
+    includeIgnored = false,
+  ): Promise<ChangeGroup> {
     const pathArguments = path ? ["--", literalPathspec(path)] : [];
-    const status = await this.run("status", ["--porcelain=v1", "-z", "--untracked-files=all", ...pathArguments], repoRoot);
+    const ignoredArguments = includeIgnored ? ["--ignored=traditional"] : [];
+    const status = await this.run(
+      "status",
+      ["--porcelain=v1", "-z", "--untracked-files=all", ...ignoredArguments, ...pathArguments],
+      cwd,
+    );
     if (status.code !== 0) throw new Error(status.stderr.trim() || "Unable to inspect Git status");
 
     const files = parsePorcelainStatus(status.stdout);
-    const label = path ? `/${path}` : "All changes";
-    if (files.length === 0) return { label, path, files, context: "", truncated: false };
+    const label = displayPath ? `/${displayPath}` : "All changes";
+    if (files.length === 0) return { label, path: displayPath, files, context: "", truncated: false };
 
     const commonDiffArgs = ["--no-ext-diff", "--no-textconv", "--no-color", "--unified=3"];
     const statArgs = ["--no-ext-diff", "--no-textconv", "--no-color", "--stat"];
     const [stagedStat, unstagedStat, stagedDiff, unstagedDiff] = await Promise.all([
-      this.run("diff", ["--cached", ...statArgs, ...pathArguments], repoRoot),
-      this.run("diff", [...statArgs, ...pathArguments], repoRoot),
-      this.run("diff", ["--cached", ...commonDiffArgs, ...pathArguments], repoRoot),
-      this.run("diff", [...commonDiffArgs, ...pathArguments], repoRoot),
+      this.run("diff", ["--cached", ...statArgs, ...pathArguments], cwd),
+      this.run("diff", [...statArgs, ...pathArguments], cwd),
+      this.run("diff", ["--cached", ...commonDiffArgs, ...pathArguments], cwd),
+      this.run("diff", [...commonDiffArgs, ...pathArguments], cwd),
     ]);
 
     for (const result of [stagedStat, unstagedStat, stagedDiff, unstagedDiff]) {
@@ -139,20 +160,32 @@ export class ReadOnlyGit {
     }
 
     const untrackedParts: string[] = [];
-    for (const file of files.filter((entry) => entry.indexStatus === "?" && entry.worktreeStatus === "?")) {
+    for (const file of files.filter((entry) => (
+      (entry.indexStatus === "?" && entry.worktreeStatus === "?") ||
+      (entry.indexStatus === "!" && entry.worktreeStatus === "!")
+    ))) {
       untrackedParts.push(`### ${file.path}\n${await previewUntrackedFile(repoRoot, file.path)}`);
     }
 
     const statusText = files.map(statusLabel).join("\n");
-    const parts = [`## Changed files\n${statusText}`];
+    const ignoredNotice = includeIgnored
+      ? "\n\nIgnored (`!!`) files are included because their containing folder was explicitly requested."
+      : "";
+    const parts = [`## Changed files\n${statusText}${ignoredNotice}`];
     const state = { used: parts[0].length, truncated: false };
     appendBounded(parts, "Staged statistics", stagedStat.stdout, state, contextLimit);
     appendBounded(parts, "Unstaged statistics", unstagedStat.stdout, state, contextLimit);
     appendBounded(parts, "Staged patch", stagedDiff.stdout, state, contextLimit);
     appendBounded(parts, "Unstaged patch", unstagedDiff.stdout, state, contextLimit);
-    appendBounded(parts, "Untracked file previews", untrackedParts.join("\n\n"), state, contextLimit);
+    appendBounded(
+      parts,
+      includeIgnored ? "Untracked and explicitly requested ignored file previews" : "Untracked file previews",
+      untrackedParts.join("\n\n"),
+      state,
+      contextLimit,
+    );
     if (state.truncated) parts.push("\n## Notice\nGit context was truncated; filenames and statuses above are complete.");
 
-    return { label, path, files, context: parts.join(""), truncated: state.truncated };
+    return { label, path: displayPath, files, context: parts.join(""), truncated: state.truncated };
   }
 }

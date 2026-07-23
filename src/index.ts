@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
@@ -17,7 +17,7 @@ import {
   type CompleteFunction,
 } from "./model.js";
 import { fuzzyFilterModelKeys, showCommitModelSelector } from "./model-selector.js";
-import type { CommitSuggestion, ModelRef } from "./types.js";
+import type { ChangeGroup, CommitSuggestion, ModelRef } from "./types.js";
 
 interface ExtensionDependencies {
   complete?: CompleteFunction;
@@ -36,6 +36,12 @@ function formatSuggestions(suggestions: CommitSuggestion[]): string {
       ? suggestion.message
       : `${suggestion.label}\n${suggestion.message}`))
     .join("\n\n");
+}
+
+function pathWithinRepository(repoRoot: string, directory: string): string | undefined {
+  const path = relative(repoRoot, directory);
+  if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) return undefined;
+  return path.split(sep).join("/");
 }
 
 export function createPiCommitExtension(dependencies: ExtensionDependencies = {}) {
@@ -129,14 +135,72 @@ export function createPiCommitExtension(dependencies: ExtensionDependencies = {}
         ctx.ui.setStatus("pi-commit", "inspecting changes…");
         try {
           await ctx.waitForIdle();
-          const repoRoot = await git.findRepositoryRoot(ctx.cwd);
           const parsedArguments = parseCommandArguments(args);
-          const requestedPaths = normalizeRequestedPaths(parsedArguments, repoRoot);
+          let currentRepoRoot: string | undefined;
+          let currentRepoError: unknown;
+          try {
+            currentRepoRoot = await git.findRepositoryRoot(ctx.cwd);
+          } catch (error) {
+            currentRepoError = error;
+          }
+
+          const requireCurrentRepository = (): string => {
+            if (currentRepoRoot) return currentRepoRoot;
+            throw currentRepoError ?? new Error("Current directory is not inside a Git repository");
+          };
+
+          if (parsedArguments.length === 0) requireCurrentRepository();
+
+          const pathBase = currentRepoRoot ?? ctx.cwd;
+          const requestedPaths = normalizeRequestedPaths(parsedArguments, pathBase);
           const groupPaths: Array<string | undefined> = requestedPaths.length ? requestedPaths : [undefined];
           const groups = [];
 
-          for (const path of groupPaths) {
-            const group = await git.collectGroup(repoRoot, path || undefined);
+          for (const requestedPath of groupPaths) {
+            let group: ChangeGroup | undefined;
+
+            if (requestedPath !== undefined) {
+              const folderCwd = resolve(pathBase, requestedPath || ".");
+              let folderRepoRoot: string | undefined;
+              try {
+                folderRepoRoot = await git.findRepositoryRoot(folderCwd);
+              } catch {
+                // Missing/non-Git folders retain the repository-root pathspec behavior.
+              }
+
+              const repositoryPath = folderRepoRoot
+                ? pathWithinRepository(folderRepoRoot, folderCwd)
+                : undefined;
+              if (folderRepoRoot && repositoryPath !== undefined) {
+                const includeIgnored = repositoryPath
+                  ? await git.isIgnoredDirectory(folderRepoRoot, repositoryPath)
+                  : false;
+                group = await git.collectGroup(
+                  folderRepoRoot,
+                  repositoryPath || undefined,
+                  undefined,
+                  folderCwd,
+                  requestedPath || undefined,
+                  includeIgnored,
+                );
+              }
+            }
+
+            if (!group) {
+              const repoRoot = requireCurrentRepository();
+              const includeIgnored = requestedPath
+                ? await git.isIgnoredDirectory(repoRoot, requestedPath)
+                : false;
+              group = await git.collectGroup(
+                repoRoot,
+                requestedPath || undefined,
+                undefined,
+                repoRoot,
+                requestedPath || undefined,
+                includeIgnored,
+              );
+            }
+
             if (group.files.length === 0) {
               report(ctx, `${group.label}: no uncommitted changes`, "warning");
               continue;
