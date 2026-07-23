@@ -1,6 +1,6 @@
 {
   "name": "@andre-barbosa/pi-commit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A read-only pi extension that suggests Conventional Commit messages for uncommitted changes",
   "type": "module",
   "license": "MIT",
